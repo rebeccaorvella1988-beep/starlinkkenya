@@ -1,11 +1,13 @@
+import { useNavigate } from "react-router-dom";
 import Hero from "@/components/Hero";
 import BundleCard from "@/components/BundleCard";
-import CheckoutForm from "@/components/CheckoutForm";
 import Footer from "@/components/Footer";
 
 const Index = () => {
-  const scrollToCheckout = () => {
-    document.getElementById("checkout")?.scrollIntoView({ behavior: "smooth" });
+  const navigate = useNavigate();
+
+  const handleSelectBundle = () => {
+    navigate('/checkout');
   };
 
   return (
@@ -27,12 +29,11 @@ const Index = () => {
           </div>
 
           <div className="max-w-md mx-auto">
-            <BundleCard onSelect={scrollToCheckout} />
+            <BundleCard onSelect={handleSelectBundle} />
           </div>
         </div>
       </section>
 
-      <CheckoutForm />
       <Footer />
     </div>
   );

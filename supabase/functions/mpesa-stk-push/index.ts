@@ -6,7 +6,6 @@ const corsHeaders = {
 };
 
 serve(async (req) => {
-  // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -16,7 +15,7 @@ serve(async (req) => {
     
     console.log('Received STK push request:', { phoneNumber, amount });
 
-    // Validate phone number format (should be 254XXXXXXXXX)
+    // Format phone number to 254XXXXXXXXX
     let formattedPhone = phoneNumber.replace(/\s/g, '').replace(/^0/, '254').replace(/^\+/, '');
     if (!formattedPhone.startsWith('254')) {
       formattedPhone = '254' + formattedPhone;
@@ -34,64 +33,75 @@ serve(async (req) => {
       throw new Error('M-Pesa credentials not configured');
     }
 
+    // Use production endpoints
+    const oauthUrl = 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials';
+    const stkPushUrl = 'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest';
+
     // Step 1: Get OAuth token
     const auth = btoa(`${consumerKey}:${consumerSecret}`);
-    console.log('Fetching OAuth token...');
+    console.log('Fetching OAuth token from production...');
     
-    const tokenResponse = await fetch(
-      'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-      {
-        method: 'GET',
-        headers: {
-          'Authorization': `Basic ${auth}`,
-        },
-      }
-    );
+    const tokenResponse = await fetch(oauthUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+      },
+    });
 
     if (!tokenResponse.ok) {
       const errorText = await tokenResponse.text();
       console.error('Token fetch failed:', errorText);
-      throw new Error('Failed to get M-Pesa access token');
+      throw new Error(`Failed to get M-Pesa access token: ${errorText}`);
     }
 
     const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
-    console.log('Got access token');
+    console.log('Got access token successfully');
 
-    // Step 2: Generate timestamp and password
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+    // Step 2: Generate timestamp (format: YYYYMMDDHHmmss)
+    const now = new Date();
+    const timestamp = now.getFullYear().toString() +
+      String(now.getMonth() + 1).padStart(2, '0') +
+      String(now.getDate()).padStart(2, '0') +
+      String(now.getHours()).padStart(2, '0') +
+      String(now.getMinutes()).padStart(2, '0') +
+      String(now.getSeconds()).padStart(2, '0');
+    
+    // Password = Base64(Shortcode + Passkey + Timestamp)
     const password = btoa(`${shortcode}${passkey}${timestamp}`);
     
     console.log('Generated timestamp:', timestamp);
 
-    // Step 3: Send STK Push request
+    // Get callback URL dynamically from Supabase
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const callbackUrl = `${supabaseUrl}/functions/v1/mpesa-callback`;
+    console.log('Callback URL:', callbackUrl);
+
+    // Step 3: Send STK Push request (PayBill)
     const stkPushPayload = {
       BusinessShortCode: shortcode,
       Password: password,
       Timestamp: timestamp,
       TransactionType: 'CustomerPayBillOnline',
-      Amount: amount,
+      Amount: Math.round(amount),
       PartyA: formattedPhone,
       PartyB: shortcode,
       PhoneNumber: formattedPhone,
-      CallBackURL: 'https://lalszahpdbkjaeipyizj.functions.supabase.co/mpesa-callback',
+      CallBackURL: callbackUrl,
       AccountReference: 'LinkNK',
       TransactionDesc: 'Satellite Bundle Purchase',
     };
 
     console.log('Sending STK push with payload:', JSON.stringify(stkPushPayload));
 
-    const stkResponse = await fetch(
-      'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(stkPushPayload),
-      }
-    );
+    const stkResponse = await fetch(stkPushUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(stkPushPayload),
+    });
 
     const stkData = await stkResponse.json();
     console.log('STK Push response:', JSON.stringify(stkData));
@@ -101,7 +111,8 @@ serve(async (req) => {
         JSON.stringify({
           success: true,
           message: 'STK push sent successfully. Please check your phone.',
-          data: stkData,
+          checkoutRequestID: stkData.CheckoutRequestID,
+          merchantRequestID: stkData.MerchantRequestID,
         }),
         {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
