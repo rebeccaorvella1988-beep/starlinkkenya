@@ -1,13 +1,42 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, XCircle, Loader2, Wifi, ArrowRight } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 
 const Processing = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [status, setStatus] = useState<'processing' | 'success' | 'failed'>('processing');
+  const [receiptNumber, setReceiptNumber] = useState<string>('');
   const { checkoutRequestID, phoneNumber } = location.state || {};
+
+  const checkPaymentStatus = useCallback(async () => {
+    if (!checkoutRequestID) return;
+
+    try {
+      const { data, error } = await supabase.functions.invoke('payment-status', {
+        body: { checkoutRequestID }
+      });
+
+      if (error) {
+        console.error('Error checking payment status:', error);
+        return;
+      }
+
+      console.log('Payment status response:', data);
+
+      if (data.status === 'success') {
+        setStatus('success');
+        setReceiptNumber(data.mpesaReceiptNumber || '');
+      } else if (data.status === 'failed') {
+        setStatus('failed');
+      }
+      // If still pending, keep polling
+    } catch (err) {
+      console.error('Failed to check payment status:', err);
+    }
+  }, [checkoutRequestID]);
 
   useEffect(() => {
     if (!checkoutRequestID) {
@@ -15,15 +44,27 @@ const Processing = () => {
       return;
     }
 
-    // Simulate payment confirmation (in production, you'd poll the callback or use websockets)
-    const timer = setTimeout(() => {
-      // For demo purposes, we'll show success after 15 seconds
-      // In production, check actual payment status via your database
-      setStatus('success');
-    }, 15000);
+    // Start polling for payment status
+    const pollInterval = setInterval(() => {
+      checkPaymentStatus();
+    }, 3000); // Check every 3 seconds
 
-    return () => clearTimeout(timer);
-  }, [checkoutRequestID, navigate]);
+    // Initial check
+    checkPaymentStatus();
+
+    // Stop polling after 2 minutes
+    const timeout = setTimeout(() => {
+      clearInterval(pollInterval);
+      if (status === 'processing') {
+        setStatus('failed');
+      }
+    }, 120000);
+
+    return () => {
+      clearInterval(pollInterval);
+      clearTimeout(timeout);
+    };
+  }, [checkoutRequestID, navigate, checkPaymentStatus, status]);
 
   const handleTryAgain = () => {
     navigate('/checkout');
@@ -60,7 +101,7 @@ const Processing = () => {
               </div>
 
               <p className="text-sm text-muted-foreground">
-                This may take up to 60 seconds...
+                Waiting for M-Pesa confirmation...
               </p>
             </div>
           )}
@@ -97,6 +138,12 @@ const Processing = () => {
                     <span className="text-muted-foreground">Amount Paid</span>
                     <span className="font-medium">KSH 400</span>
                   </div>
+                  {receiptNumber && (
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Receipt</span>
+                      <span className="font-medium">{receiptNumber}</span>
+                    </div>
+                  )}
                   {phoneNumber && (
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Phone</span>
@@ -125,7 +172,7 @@ const Processing = () => {
               <h2 className="text-2xl font-bold mb-4 text-destructive">Payment Failed</h2>
               
               <p className="text-muted-foreground mb-6">
-                The payment could not be completed. This might be due to insufficient funds or a cancelled transaction.
+                The payment could not be completed. This might be due to insufficient funds, cancelled transaction, or wrong PIN.
               </p>
 
               <div className="space-y-3">

@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -33,7 +34,9 @@ serve(async (req) => {
       throw new Error('M-Pesa credentials not configured');
     }
 
-    // Use production endpoints
+    console.log('Using shortcode:', shortcode);
+
+    // Production endpoints
     const oauthUrl = 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials';
     const stkPushUrl = 'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest';
 
@@ -48,34 +51,54 @@ serve(async (req) => {
       },
     });
 
+    const tokenText = await tokenResponse.text();
+    console.log('Token response status:', tokenResponse.status);
+    
     if (!tokenResponse.ok) {
-      const errorText = await tokenResponse.text();
-      console.error('Token fetch failed:', errorText);
-      throw new Error(`Failed to get M-Pesa access token: ${errorText}`);
+      console.error('Token fetch failed:', tokenText);
+      throw new Error(`Failed to get M-Pesa access token: ${tokenText}`);
     }
 
-    const tokenData = await tokenResponse.json();
-    const accessToken = tokenData.access_token;
-    console.log('Got access token successfully');
+    let tokenData;
+    try {
+      tokenData = JSON.parse(tokenText);
+    } catch (e) {
+      console.error('Failed to parse token response:', tokenText);
+      throw new Error('Invalid token response from M-Pesa');
+    }
 
-    // Step 2: Generate timestamp (format: YYYYMMDDHHmmss)
+    const accessToken = tokenData.access_token;
+    if (!accessToken) {
+      console.error('No access token in response:', tokenData);
+      throw new Error('No access token received from M-Pesa');
+    }
+    
+    console.log('Got access token, length:', accessToken.length);
+
+    // Step 2: Generate timestamp (format: YYYYMMDDHHmmss) - Use EAT timezone (UTC+3)
     const now = new Date();
-    const timestamp = now.getFullYear().toString() +
-      String(now.getMonth() + 1).padStart(2, '0') +
-      String(now.getDate()).padStart(2, '0') +
-      String(now.getHours()).padStart(2, '0') +
-      String(now.getMinutes()).padStart(2, '0') +
-      String(now.getSeconds()).padStart(2, '0');
+    // Add 3 hours for EAT timezone
+    const eat = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+    const timestamp = eat.getFullYear().toString() +
+      String(eat.getMonth() + 1).padStart(2, '0') +
+      String(eat.getDate()).padStart(2, '0') +
+      String(eat.getHours()).padStart(2, '0') +
+      String(eat.getMinutes()).padStart(2, '0') +
+      String(eat.getSeconds()).padStart(2, '0');
     
     // Password = Base64(Shortcode + Passkey + Timestamp)
     const password = btoa(`${shortcode}${passkey}${timestamp}`);
     
-    console.log('Generated timestamp:', timestamp);
+    console.log('Generated timestamp (EAT):', timestamp);
 
     // Get callback URL dynamically from Supabase
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const callbackUrl = `${supabaseUrl}/functions/v1/mpesa-callback`;
     console.log('Callback URL:', callbackUrl);
+
+    // Initialize Supabase client to save payment session
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabase = createClient(supabaseUrl!, supabaseServiceKey!);
 
     // Step 3: Send STK Push request (PayBill)
     const stkPushPayload = {
@@ -92,7 +115,8 @@ serve(async (req) => {
       TransactionDesc: 'Satellite Bundle Purchase',
     };
 
-    console.log('Sending STK push with payload:', JSON.stringify(stkPushPayload));
+    console.log('Sending STK push to:', stkPushUrl);
+    console.log('STK push payload:', JSON.stringify(stkPushPayload));
 
     const stkResponse = await fetch(stkPushUrl, {
       method: 'POST',
@@ -103,10 +127,37 @@ serve(async (req) => {
       body: JSON.stringify(stkPushPayload),
     });
 
-    const stkData = await stkResponse.json();
-    console.log('STK Push response:', JSON.stringify(stkData));
+    const stkText = await stkResponse.text();
+    console.log('STK Push response status:', stkResponse.status);
+    console.log('STK Push response:', stkText);
+
+    let stkData;
+    try {
+      stkData = JSON.parse(stkText);
+    } catch (e) {
+      console.error('Failed to parse STK response:', stkText);
+      throw new Error('Invalid response from M-Pesa STK push');
+    }
 
     if (stkData.ResponseCode === '0') {
+      // Save pending payment session to database
+      const { error: dbError } = await supabase
+        .from('payment_sessions')
+        .insert({
+          checkout_request_id: stkData.CheckoutRequestID,
+          merchant_request_id: stkData.MerchantRequestID,
+          phone_number: formattedPhone,
+          amount: Math.round(amount),
+          status: 'pending'
+        });
+
+      if (dbError) {
+        console.error('Failed to save payment session:', dbError);
+        // Don't throw - payment was initiated successfully
+      } else {
+        console.log('Payment session saved to database');
+      }
+
       return new Response(
         JSON.stringify({
           success: true,
@@ -119,10 +170,14 @@ serve(async (req) => {
         }
       );
     } else {
+      // Log the error for debugging
+      console.error('STK Push failed with response:', stkData);
+      
       return new Response(
         JSON.stringify({
           success: false,
           message: stkData.errorMessage || stkData.ResponseDescription || 'STK push failed',
+          errorCode: stkData.errorCode || stkData.ResponseCode,
           data: stkData,
         }),
         {
