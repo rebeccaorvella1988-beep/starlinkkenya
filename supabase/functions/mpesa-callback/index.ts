@@ -24,6 +24,12 @@ serve(async (req) => {
     console.log('Result Code:', resultCode);
     console.log('Result Description:', resultDesc);
     console.log('CheckoutRequestID:', checkoutRequestID);
+    console.log('MerchantRequestID:', merchantRequestID);
+
+    // Initialize Supabase client
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabase = createClient(supabaseUrl!, supabaseServiceKey!);
 
     // Extract callback metadata if payment was successful
     let amount = 0;
@@ -58,10 +64,41 @@ serve(async (req) => {
         transactionDate
       });
 
-      // Here you would typically save to database
-      // For now, we just log the successful transaction
+      // Update payment session to success
+      const { error: updateError } = await supabase
+        .from('payment_sessions')
+        .update({
+          status: 'success',
+          result_code: resultCode,
+          result_desc: resultDesc,
+          mpesa_receipt_number: mpesaReceiptNumber,
+          transaction_date: transactionDate,
+        })
+        .eq('checkout_request_id', checkoutRequestID);
+
+      if (updateError) {
+        console.error('Failed to update payment session:', updateError);
+      } else {
+        console.log('Payment session updated to success');
+      }
     } else {
       console.log('Payment failed or cancelled:', resultDesc);
+
+      // Update payment session to failed
+      const { error: updateError } = await supabase
+        .from('payment_sessions')
+        .update({
+          status: 'failed',
+          result_code: resultCode,
+          result_desc: resultDesc,
+        })
+        .eq('checkout_request_id', checkoutRequestID);
+
+      if (updateError) {
+        console.error('Failed to update payment session:', updateError);
+      } else {
+        console.log('Payment session updated to failed');
+      }
     }
 
     return new Response(
